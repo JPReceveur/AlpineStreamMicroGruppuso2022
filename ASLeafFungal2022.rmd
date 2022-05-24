@@ -1,0 +1,835 @@
+---
+title: "ASLeaf Fungal 2022"
+author: "JReceveur"
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_depth: 3
+    toc_float: true
+editor_options: 
+  chunk_output_type: console
+---
+  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=14, fig.height=10)
+knitr::opts_chunk$set(fig.align="center")
+```
+
+
+
+
+# Import{.tabset}
+
+## Sample Overview
+
+```{r,warning=F,include=F}
+#From https://gist.github.com/grabear/018e86413b19b62a6bb8e72a9adba349
+#Parse Silva function
+
+parse_taxonomy_silva_138 <- function(char.vec){
+  # Use default to assign names to elements in case problem with greengenes prefix
+  char.vec = parse_taxonomy_default(char.vec)
+  # Check for unassigned taxa
+  if (char.vec["Rank1"] == "Unassigned") {
+    char.vec <- c(Rank1="d__Unassigned", Rank2="d__Unassigned", Rank3="d__Unassigned", Rank4="d__Unassigned",
+                  Rank5="d__Unassigned", Rank6="d__Unassigned", Rank7="d__Unassigned")
+  }
+  # Define the meaning of each prefix according to SILVA taxonomy
+  Tranks = c(Rank1="Kingdom", Rank2="Phylum", Rank3="Class", Rank4="Order", Rank5="Family", Rank6="Genus", Rank7="Species")
+  # Check for prefix using regexp, warn if there were none. trim indices, ti
+  ti = grep("[[:alpha:]]\\_\\_", char.vec)
+  if( length(ti) == 0L ){
+    warning(
+      "No silva prefixes were found. \n",
+      "Consider using parse_taxonomy_delfault() instead if true for all OTUs. \n",
+      "Dummy ranks may be included among taxonomic ranks now."
+    )
+    # Will want to return without further modifying char.vec
+    taxvec = char.vec
+    # Replace names of taxvec according to prefix, if any present...
+  } else {
+    # Format character vectors for Ambiguous taxa
+    if( length(ti) < 7 ){
+      for (key in names(char.vec)) {
+        if ( char.vec[key] == "Ambiguous_taxa" ) {
+          tax_no <- (as.numeric(substr(key, 5, 5)) - 1)
+          char.vec[key] = sprintf("d__Ambiguous_taxa", tax_no)
+        }
+      }
+      # Reset the trimmed indicies if Ambiguous taxa
+      ti = grep("[[:alpha:]]\\_\\_", char.vec)
+    }
+    # Remove prefix using sub-"" regexp, call result taxvec
+    taxvec = gsub("[[:alpha:]]\\_\\_", "", char.vec)
+    # Define the ranks that will be replaced
+    repranks = Tranks[substr(char.vec[ti], 1, 3)]
+    # Replace, being sure to avoid prefixes notK present in Tranks
+    names(taxvec)[ti[!is.na(repranks)]] = repranks[!is.na(repranks)]
+  }
+  return(taxvec)
+}
+
+
+
+
+library(vegan)
+library(ggplot2)
+library(plyr)
+library(dplyr)
+library(phyloseq)
+library(randomForest)
+library(knitr)
+library(ggpubr)
+
+
+
+
+set.seed(10)
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E484", "#0072B2", "#D55E00", "#000000","#CC79A7") #Build a colorblind palette
+
+
+
+theme_set(theme_bw(base_size = 18)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())) #Set font size and change default plot theme
+
+biom=import_biom("ASLeafJan2021ITS_6k.biom",parseFunction=parse_taxonomy_silva_138) #Import biom file which contains taxa names and abundances 
+colnames(tax_table(biom))<-c(Rank1="Kingdom", Rank2="Phylum", Rank3="Class", Rank4="Order", Rank5="Family", Rank6="Genus", Rank7="Species")
+
+
+
+
+metadata=read.table("LauraMetadata9Dec2020.txt",header = TRUE)
+
+metadata$Date = factor(metadata$Date, levels = c("3_1","24_1","14_2","7_3","29_3","19_4")) #fixes x-axis labels
+metadata$Paired<-paste0(metadata$Site,metadata$Date)
+
+tree=read_tree("ASLeafTreeITS.nwk")
+
+sampdat=sample_data(metadata)
+sample_names(sampdat)=metadata$FungalID # If using fungal data change ID to FungalID
+physeq=merge_phyloseq(biom,sampdat,tree)
+physeq<-filter_taxa(physeq, function (x) {sum(x > 0) > 1}, prune=TRUE)#Remove singletons and zeros
+physeq
+physeq<-subset_samples(physeq, Site!="<NA>") # Remove Control
+physeq
+#physeq 
+
+
+
+GPr  = transform_sample_counts(physeq, function(x) x / sum(x) ) #transform samples based on relative abundance
+PhylumAll=tax_glom(GPr, "Phylum")
+
+PhylumLevel = filter_taxa(PhylumAll, function(x) mean(x) > 1e-2, TRUE) #filter out any taxa lower than 1%
+FamilyAll=tax_glom(GPr,"Family")
+FamilyLevel = filter_taxa(FamilyAll, function(x) mean(x) > 2e-2, TRUE) #filter out any taxa lower than 2%
+GenusAll=tax_glom(GPr,"Genus")
+GenusLevel = filter_taxa(GenusAll, function(x) mean(x) > 2e-2, TRUE) #filter out any taxa lower than 2%
+
+```
+
+
+Unique fungal ASVs between leaf types
+```{r}
+df <- psmelt(physeq)
+head(df)
+length(unique(df$OTU))
+
+OakSubset<-subset(df,Treatment=="Q")
+OakSubset<-subset(OakSubset,Abundance!=0)
+length(unique(OakSubset$OTU))
+
+ChestnutSubset<-subset(df,Treatment=="C")
+ChestnutSubset<-subset(ChestnutSubset,Abundance!=0)
+length(unique(ChestnutSubset$OTU))
+
+length(intersect(OakSubset$OTU,ChestnutSubset$OTU)) #558
+
+
+length(setdiff(ChestnutSubset$OTU,OakSubset$OTU)) #223 ASVs in Chestnut but not in Oak
+length(setdiff(OakSubset$OTU,ChestnutSubset$OTU)) # 257 ASVs in Oak but not in Chestnut
+
+
+## Unique ASVs by day
+
+#########
+# Day 21
+#########
+
+Timepoint1<-subset_samples(physeq,Days==21)
+df1 <- psmelt(Timepoint1)
+
+OakSubset1<-subset(df1,Treatment=="Q")
+OakSubset1<-subset(OakSubset1,Abundance!=0)
+length(unique(OakSubset1$OTU)) #315
+
+ChestnutSubset1<-subset(df1,Treatment=="C")
+ChestnutSubset1<-subset(ChestnutSubset1,Abundance!=0)
+length(unique(ChestnutSubset1$OTU)) #273
+
+length(intersect(OakSubset1$OTU,ChestnutSubset1$OTU)) #108
+length(union(OakSubset1$OTU,ChestnutSubset1$OTU)) #480
+
+length(setdiff(ChestnutSubset1$OTU,OakSubset1$OTU)) #165 ASVs in Chestnut but not in Oak
+length(setdiff(OakSubset1$OTU,ChestnutSubset1$OTU)) # 207 ASVs in Oak but not in Chestnut
+
+#########
+# Day 126
+#########
+
+Timepoint126<-subset_samples(physeq,Days==126)
+df126 <- psmelt(Timepoint126)
+
+OakSubset126<-subset(df126,Treatment=="Q")
+OakSubset126<-subset(OakSubset126,Abundance!=0)
+length(unique(OakSubset126$OTU)) #376
+
+ChestnutSubset126<-subset(df126,Treatment=="C")
+ChestnutSubset126<-subset(ChestnutSubset126,Abundance!=0)
+length(unique(ChestnutSubset126$OTU)) #356
+
+length(intersect(OakSubset126$OTU,ChestnutSubset126$OTU)) #170
+length(union(OakSubset126$OTU,ChestnutSubset126$OTU)) #562
+
+length(setdiff(ChestnutSubset126$OTU,OakSubset126$OTU)) #186 ASVs in Chestnut but not in Oak at day 126
+length(setdiff(OakSubset126$OTU,ChestnutSubset126$OTU)) # 206 ASVs in Oak but not in Chestnut at day 126
+
+```
+
+# Fungal Shannon Diversity
+```{r}
+Shannon<-plot_richness(physeq, x="LeafMassRemaining",color="SampleType",shape="Treatment", measures=c("Shannon"))+ylab("Shannon Diversity")+geom_point()+scale_fill_manual(cbPalette)+geom_point(size=5)+facet_wrap(~SampleType)
+Shannon
+ShannonData<-Shannon$data
+
+
+
+
+
+ShannonAOV<-aov(value~RiverType*Treatment*as.factor(Days),data=ShannonData)
+summary(ShannonAOV)
+# plot(ShannonAOV) #plots ok at best, no major bias by fitted values
+hist(resid(ShannonAOV))
+shapiro.test(resid(ShannonAOV)) # Shapiro test p = 0.359
+library(ggpubr)
+FungalLeafDiversityPaired<-ggpaired(ShannonData,x="Treatment2",y="value",id="Paired",color="Treatment2",shape="Treatment2",line.color = "gray", line.size = 0.4,)+ylab("Fungal Shannon Diversity")+xlab("Leaf Type")+stat_compare_means(paired=T)+rremove("legend")+scale_color_manual(values=cbPalette)
+FungalLeafDiversityPaired
+
+
+# Difference in paired samples
+CombinedDifference<-data.frame()
+for (i in unique(ShannonData$Paired)){
+  Subset<-subset(ShannonData, Paired==i)
+  LeafQ<-subset(Subset,Treatment=="Q")
+  LeafC<-subset(Subset,Treatment=="C")
+  Difference<-LeafQ$value-LeafC$value
+  CombinedDifference<-rbind(CombinedDifference,Difference)
+}
+colnames(CombinedDifference)<-"Difference"
+hist(CombinedDifference$Difference)
+mean(CombinedDifference$Difference) # 0.292
+sd(CombinedDifference$Difference)/sqrt(length(CombinedDifference$Difference)) # 0.069
+
+
+
+ShannonSummary <- ddply(ShannonData, c("Treatment2","Days","SampleType"), summarise,
+                 N    = length(value),
+                 mean = mean(value),
+                 sd   = sd(value),
+                 se   = sd / sqrt(N)
+)
+
+ggplot(ShannonSummary,aes(x=as.factor(Days),y=mean,group=SampleType,color=SampleType,shape=SampleType))+geom_line(size=2)+facet_wrap(~Treatment2)+ylab("Fungal Shannon Diversity (+/- SEM)")+
+  geom_point(data=ShannonData,aes(x=as.factor(Days),y=value))+ geom_errorbar(aes(ymin=mean-se,ymax=mean+se))+geom_jitter()+xlab("Days")
+
+
+ShannonSummary <- ddply(ShannonData, c("Treatment2","Days","RiverType"), summarise,
+                 N    = length(value),
+                 mean = mean(value),
+                 sd   = sd(value),
+                 se   = sd / sqrt(N)
+)
+
+FungalShannonRiverPlot<-ggplot(ShannonSummary,aes(x=as.factor(Days),y=mean,group=RiverType,color=RiverType,shape=RiverType))+geom_line(size=1)+facet_wrap(~Treatment2)+ylab("Fungal Shannon Diversity (+/- SEM)")+
+  geom_point(data=ShannonData,aes(x=as.factor(Days),y=value))+ geom_errorbar(aes(ymin=mean-se,ymax=mean+se))+geom_jitter()+xlab("Days")+theme(legend.justification=c(1,0), legend.position=c(.95,0.05))
+FungalShannonRiverPlot
+
+
+```
+
+Fungal Shannon diversity fig
+```{r}
+
+theme_set(theme_bw(base_size = 10)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())) #Set font size and change default plot theme
+
+
+dev.off()
+tiff("Figures/FungalDiversityFig.tiff", width = 174, height = 84, units = 'mm', res = 600)
+ggarrange(FungalShannonRiverPlot,FungalLeafDiversityPaired,
+          labels = c("a", "b"),
+          ncol = 2, nrow = 1)
+dev.off()
+
+theme_set(theme_bw(base_size = 18)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())) #Set font size and change default plot theme
+
+
+```
+
+```{r}
+CData<-subset(ShannonData,Treatment=="C")
+QData<-subset(ShannonData,Treatment=="Q")
+
+
+CShannonAOV<-aov(value~RiverType*as.factor(Days),data=CData)
+summary(CShannonAOV)
+hist(resid(CShannonAOV))
+plot(CShannonAOV)
+shapiro.test(resid(CShannonAOV)) #p=0.18
+
+QShannonAOV<-aov(value~SampleType*as.factor(Days),data=QData)
+summary(QShannonAOV)
+hist(resid(QShannonAOV))
+plot(QShannonAOV)
+shapiro.test(resid(QShannonAOV)) #p=.77
+
+```
+
+Taxonomy plots
+
+# Taxa plots
+
+```{r,warning=F}
+###########
+#Phylum level plot
+###########
+df <- psmelt(PhylumLevel)
+df$Abundance=df$Abundance*100
+
+ddply(df, c("Phylum"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance),
+                 sd   = sd(Abundance),
+                 se   = sd / sqrt(N)
+)
+
+
+
+Trtdata <- ddply(df, c("Phylum","Treatment2","Days","RiverType"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance),
+                 sd   = sd(Abundance),
+                 se   = sd / sqrt(N)
+)
+Trtdata
+PhylumPlotTreatment=ggplot(Trtdata, aes(x=as.factor(Days),y=mean))+geom_bar(aes(fill = Phylum),colour="black", stat="identity")+
+  facet_grid(RiverType~Treatment2)+xlab("Days")+ylab("Relative Abundance (> 3%)")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+PhylumPlotTreatment
+
+```
+
+
+```{r}
+compare_means(Abundance ~ Treatment2, data = df, group.by = "Phylum", p.adjust.method = "fdr",method="kruskal.test") # ns
+
+
+
+
+dfC<-subset(df,Treatment=="C")
+dfQ<-subset(df,Treatment=="Q")
+compare_means(Abundance ~ RiverType, data = dfQ, group.by = "Phylum", p.adjust.method = "fdr",method="kruskal.test") # ns
+compare_means(Abundance ~ RiverType, data = dfC, group.by = "Phylum", p.adjust.method = "fdr",method="kruskal.test") # ns
+
+
+Basido<-subset(df,Phylum=="Basidiomycota")
+
+BasidoSum <- ddply(Basido, c("Phylum","Treatment2"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance),
+                 sd   = sd(Abundance),
+                 se   = sd / sqrt(N)
+)
+
+ggplot(BasidoSum, aes(x=as.factor(Treatment2),y=mean))+geom_bar(aes(fill = Phylum),colour="black", stat="identity")+xlab("Days")+ylab("Relative Abundance (> 3%, SEM)")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),legend.position = "none")+geom_errorbar(aes(ymin=mean-se,ymax=mean+se))+scale_fill_manual(values=cbPalette[2])
+
+
+compare_means(Abundance ~ SampleType, data = dfC, group.by = "Phylum", p.adjust.method = "fdr",method="kruskal.test") # ns
+
+
+
+
+
+```
+
+Family level comparisons
+
+
+```{r}
+
+df <- psmelt(FamilyLevel)
+df$Abundance=df$Abundance*100
+Trtdata <- ddply(df, c("Family","Treatment2","Days","RiverType"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance),
+                 sd   = sd(Abundance),
+                 se   = sd / sqrt(N)
+)
+
+
+
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#000000","#CC79A7") #Build a user defined colorblind palette
+
+FamilyPlotTreatment=ggplot(Trtdata, aes(x=as.factor(Days),y=mean))+geom_bar(aes(fill = Family),colour="black", stat="identity")+
+  facet_grid(RiverType~Treatment2)+xlab("Days")+ylab("Relative Abundance (> 3%, SEM)")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+scale_fill_manual(values = cbPalette)
+FamilyPlotTreatment
+
+TrtdataC<-subset(Trtdata, Treatment2=="Chestnut")
+
+FamilyPlotTreatmentC=ggplot(TrtdataC, aes(x=as.factor(Days),y=mean))+geom_bar(aes(fill = Family),colour="black", stat="identity")+
+  facet_grid(RiverType~Family)+xlab("Days")+ylab("Relative Abundance (> 3%, SEM)")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),legend.position="none")+geom_errorbar(aes(ymin=mean-se,ymax=mean+se))
+FamilyPlotTreatmentC
+
+
+
+TrtdataQ<-subset(Trtdata, Treatment2=="Oak")
+
+FamilyPlotTreatmentQ=ggplot(TrtdataQ, aes(x=as.factor(Days),y=mean))+geom_bar(aes(fill = Family),colour="black", stat="identity")+
+  facet_grid(RiverType~Family)+xlab("Days")+ylab("Relative Abundance (> 3%, SEM)")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),legend.position="none")+geom_errorbar(aes(ymin=mean-se,ymax=mean+se))
+FamilyPlotTreatmentQ
+
+
+
+
+dfC<-subset(df,Treatment=="C")
+dfQ<-subset(df,Treatment=="Q")
+compare_means(Abundance ~ RiverType, data = dfQ, group.by = "Family", p.adjust.method = "fdr",method="kruskal.test") # ns, pleomassariaceae close
+compare_means(Abundance ~ RiverType, data = dfC, group.by = "Family", p.adjust.method = "fdr",method="kruskal.test") # Pleomassariaceae
+
+
+
+Pleo<-subset(df,Family=="Pleomassariaceae")
+
+PleoSum <- ddply(Pleo, c("Family","Treatment2","RiverType"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance),
+                 sd   = sd(Abundance),
+                 se   = sd / sqrt(N)
+)
+
+PleoByRiver<-ggplot(PleoSum, aes(x=as.factor(RiverType),y=mean))+geom_bar(aes(fill = RiverType),colour="black", stat="identity")+xlab("")+ylab("Rel. Abundance Pleomassariaceae (%)")+facet_grid(~Treatment2)+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),legend.position = "none")+geom_errorbar(aes(ymin=mean-se,ymax=mean+se))
+PleoByRiver
+
+ggplot(Pleo, aes(x=as.factor(RiverType),y=Abundance))+xlab("River Type")+ylab("Relative Abundance Pleomassariaceae (%)")+facet_grid(~Treatment2)+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),legend.position = "none")+
+  geom_boxplot()+geom_point()
+
+
+
+
+
+# Between leaf types
+compare_means(Abundance ~ Treatment2, data = df, group.by = "Family", p.adjust.method = "fdr",method="kruskal.test") # ns
+
+head(metadata)
+
+
+Trtdata <- ddply(df, c("Family","Treatment2"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance),
+                 sd   = sd(Abundance),
+                 se   = sd / sqrt(N)
+)
+
+Trtdata
+
+FamilyPlotLeafType=ggplot(Trtdata, aes(x=Treatment2,y=mean))+geom_bar(aes(fill = Treatment2),colour="black", stat="identity")+
+  facet_grid(~Family)+xlab("Leaf Type")+ylab("Relative Abundance (> 3%, SEM)")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),legend.position = "none")+scale_fill_manual(values = cbPalette)+ geom_errorbar(aes(ymin=mean-se,ymax=mean+se))
+FamilyPlotLeafType
+
+
+
+
+```
+
+Family level tax figure
+
+```{r}
+theme_set(theme_bw(base_size = 9)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())) #Set font size and change default plot theme
+
+
+dev.off()
+tiff("Figures/FungalTaxFigure.tiff", width = 174, height = 84, units = 'mm', res = 1200)
+ggarrange(FamilyPlotTreatment,PleoByRiver,
+          labels = c("a", "b"),
+          ncol = 2, nrow = 1)
+dev.off()
+
+theme_set(theme_bw(base_size = 8)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())) #Set font size and change default plot theme
+
+dev.off()
+tiff("Figures/FungalFamilyFigureByLeaf.tiff", width = 174, height = 84, units = 'mm', res = 1200)
+ggarrange(FamilyPlotLeafType,
+          labels = c("c"),
+          ncol = 1, nrow = 1)
+dev.off()
+theme_set(theme_bw(base_size = 18)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())) #Set font size and change default plot theme
+
+
+
+```
+
+
+
+
+PERMANOVA
+
+```{r}
+set.seed(12345)
+GPdist=phyloseq::distance(physeq, "bray")
+adonis(GPdist ~ RiverType*Treatment*Site+Date, as(sample_data(physeq), "data.frame"))
+
+set.seed(12345)
+GPdist=phyloseq::distance(physeq, "bray")
+adonis(GPdist ~ SampleType*Treatment*Site+Date, as(sample_data(physeq), "data.frame"))
+
+
+```
+
+PCoA plot
+
+```{r}
+theme_set(theme_bw(base_size = 12)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())) #Set font size and change default plot theme
+
+set.seed(12345)
+ord=ordinate(physeq,"PCoA", "bray")
+ordplot=plot_ordination(physeq, ord,"samples", color="Treatment2",shape="SampleType")+geom_point(size=4)+scale_colour_manual(values=cbPalette)+scale_fill_manual(values=cbPalette)
+ordplot+facet_wrap(~Days)+
+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+ stat_ellipse(aes(group=Treatment2,color=Treatment2,fill = Treatment2),type= "norm",geom = "polygon", alpha = 1/4)+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))#+ theme(legend.justification=c(1,0), legend.position=c(1,0))
+
+
+
+set.seed(12345)
+ord=ordinate(physeq,"PCoA", "bray")
+ordplot=plot_ordination(physeq, ord,"samples", color="Treatment2",shape="RiverType")+geom_point(size=4)+scale_colour_manual(values=cbPalette)+scale_fill_manual(values=cbPalette)+scale_shape_manual(values=c(16, 17, 18))
+ordplot+facet_wrap(~Days)+
+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+ stat_ellipse(aes(group=Treatment2,color=Treatment2,fill = Treatment2),type= "norm",geom = "polygon", alpha = 1/4)+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))#+ theme(legend.justification=c(1,0), legend.position=c(1,0))
+
+
+
+
+```
+
+
+
+
+```{r,warning=F}
+print("Treatment")
+set.seed(155258)
+GenusLevelRF = filter_taxa(GenusAll, function(x) mean(x) > 1e-2, TRUE) #filter out any taxa lower than 1%
+
+ForestData=GenusLevelRF#Change this one so you dont have to rewrite all variables
+predictors=t(otu_table(ForestData))
+response <- as.factor(sample_data(ForestData)$SampleType)
+rf.data <- data.frame(response, predictors)
+MozzieForest <- randomForest(response~., data = rf.data, ntree = 1000,importance=T)
+print(MozzieForest)#returns overall Random Forest results
+
+imp <- importance(MozzieForest)#all the steps that are imp or imp. are building a dataframe that contains info about the taxa used by the Random Forest testto classify treatment 
+imp <- data.frame(predictors = rownames(imp), imp)
+imp.sort <- arrange(imp, desc(MeanDecreaseAccuracy))
+imp.sort$predictors <- factor(imp.sort$predictors, levels = imp.sort$predictors)
+imp.20 <- imp.sort[1:10, ]
+
+ggplot(imp.20, aes(x = predictors, y = MeanDecreaseAccuracy)) +
+  geom_bar(stat = "identity", fill = "indianred") +
+  coord_flip() +
+  ggtitle("Most important genera for classifying  samples\n by Treatment")#\n in a string tells it to start a new line
+
+
+
+destroyX = function(es) {
+  f = es
+  for (row in c(1:nrow(f))){ #for each column in dataframe
+    if (startsWith(row.names(f)[row], "X") == TRUE)  { #if starts with 'X' ..
+      row.names(f)[row] <- substr(row.names(f)[row], 2, 100) #get rid of it
+    }
+    assign(deparse(substitute(es)), f, inherits = TRUE)
+  }
+}
+imp.20<-imp.20[1:7,] # First 7 only based on MDA plot
+destroyX(imp.20)
+
+
+otunames <- row.names(imp.20)
+r <- rownames(tax_table(ForestData)) %in% otunames
+otunames
+PredictorTable<-kable(tax_table(ForestData)[r, ])#returns a list of the most important predictors for Random Forest Classification
+
+GenusRandomForestSubset = subset_taxa(GenusAll, row.names(tax_table(GenusAll))%in% otunames)
+
+df <- psmelt(GenusRandomForestSubset)
+df$Abundance=df$Abundance*100
+
+dfSorted<- df[with(df, order(Genus)), ]
+dfSorted$FamilyGenus<-paste0(dfSorted$Family,": \n",dfSorted$Genus)
+Trtdata <- ddply(dfSorted, c("FamilyGenus", "Treatment"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance),
+                 sd   = sd(Abundance),
+                 se   = sd / sqrt(N)
+)
+TrtdataSorted<- Trtdata[with(Trtdata, order(FamilyGenus)), ]
+TrtdataSorted
+
+
+cdataplot=ggplot(Trtdata, aes(x=Treatment,y=mean))+geom_bar(aes(fill = Treatment),colour="black", stat="identity")+xlab("Leaf Type ")+ylab("Relative Abundance (%)") + theme(axis.text.x = element_text(angle = 0, hjust = 0.5))+theme(axis.title.x=element_blank())+facet_wrap(~FamilyGenus,scales = "free_y")+geom_errorbar(aes(ymin=mean-se,ymax=mean+se))+scale_fill_manual(values=cbPalette)
+cdataplot
+
+Comparisons<-compare_means(Abundance ~ Treatment, data = dfSorted, group.by = "FamilyGenus", p.adjust.method = "fdr",method="kruskal.test")
+Comparisons
+#write.csv(Comparisons, "GenusLevelRFIndicatorsLeafType.csv")
+
+
+
+```
+
+
+
+```{r}
+
+
+ggplot(ShannonData,aes(x=LeafMassRemaining,y=value,size=LeafMassRemaining))+geom_point()+facet_wrap(RiverType~Treatment)
+
+```
+
+
+Rev vs cri comparison
+```{r}
+RevVCri<-subset_samples(physeq, Site=="RE"|Site=="CRI")
+
+
+
+set.seed(12345)
+ord=ordinate(RevVCri,"PCoA", "bray")
+ordplot=plot_ordination(RevVCri, ord,"samples", color="Site",shape="Treatment2")+geom_point(size=4)+scale_colour_manual(values=cbPalette)+scale_fill_manual(values=cbPalette)
+ordplot+facet_wrap(~Days)+
+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())#+ theme(legend.justification=c(1,0), legend.position=c(1,0))
+
+
+
+set.seed(155258)
+GenusLevelRF = filter_taxa(GenusAll, function(x) mean(x) > 1e-2, TRUE) #filter out any taxa lower than 1%
+RevVCriGenus<-subset_samples(GenusLevelRF, Site=="RE"|Site=="CRI"&Treatment=="Q")
+
+
+ForestData=RevVCriGenus#Change this one so you dont have to rewrite all variables
+predictors=t(otu_table(ForestData))
+response <- as.factor(sample_data(ForestData)$Site)
+rf.data <- data.frame(response, predictors)
+MozzieForest <- randomForest(response~., data = rf.data, ntree = 1000,importance=T)
+print(MozzieForest)#returns overall Random Forest results
+
+imp <- data.frame(predictors = rownames(imp), imp)
+imp.sort <- arrange(imp, desc(MeanDecreaseAccuracy))
+imp.sort$predictors <- factor(imp.sort$predictors, levels = imp.sort$predictors)
+imp.20 <- imp.sort[1:10, ]
+
+ggplot(imp.20, aes(x = predictors, y = MeanDecreaseAccuracy)) +
+  geom_bar(stat = "identity", fill = "indianred") +
+  coord_flip() +
+  ggtitle("Most important genera for classifying  samples\n by Treatment")#\n in a string tells it to start a new line
+
+
+
+destroyX = function(es) {
+  f = es
+  for (row in c(1:nrow(f))){ #for each column in dataframe
+    if (startsWith(row.names(f)[row], "X") == TRUE)  { #if starts with 'X' ..
+      row.names(f)[row] <- substr(row.names(f)[row], 2, 100) #get rid of it
+    }
+    assign(deparse(substitute(es)), f, inherits = TRUE)
+  }
+}
+imp.20<-imp.20[1:7,] # First 7 only based on MDA plot
+destroyX(imp.20)
+
+
+otunames <- row.names(imp.20)
+r <- rownames(tax_table(ForestData)) %in% otunames
+otunames
+PredictorTable<-kable(tax_table(ForestData)[r, ])#returns a list of the most important predictors for Random Forest Classification
+
+GenusRandomForestSubset = subset_taxa(GenusAll, row.names(tax_table(GenusAll))%in% otunames)
+
+df <- psmelt(GenusRandomForestSubset)
+df$Abundance=df$Abundance*100
+df<-subset(df, Site=="RE"|Site=="CRI")
+
+dfSorted<- df[with(df, order(Genus)), ]
+dfSorted$FamilyGenus<-paste0(dfSorted$Family,": \n",dfSorted$Genus)
+Trtdata <- ddply(dfSorted, c("FamilyGenus", "Site"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance),
+                 sd   = sd(Abundance),
+                 se   = sd / sqrt(N)
+)
+TrtdataSorted<- Trtdata[with(Trtdata, order(FamilyGenus)), ]
+TrtdataSorted
+
+
+cdataplot=ggplot(Trtdata, aes(x=Site,y=mean))+geom_bar(aes(fill = Site),colour="black", stat="identity")+xlab("Leaf Type ")+ylab("Relative Abundance (%)") + theme(axis.text.x = element_text(angle = 0, hjust = 0.5))+theme(axis.title.x=element_blank())+facet_wrap(~FamilyGenus,scales = "free_y")+geom_errorbar(aes(ymin=mean-se,ymax=mean+se))+scale_fill_manual(values=cbPalette)
+cdataplot
+
+```
+
+Random Forest comparisons
+
+
+Leaf Type
+
+```{r}
+print("Treatment")
+set.seed(155258)
+GenusLevelRF = filter_taxa(GenusAll, function(x) mean(x) > 1e-2, TRUE) #filter out any taxa lower than 1%
+
+ForestData=GenusLevelRF#Change this one so you dont have to rewrite all variables
+predictors=t(otu_table(ForestData))
+response <- as.factor(sample_data(ForestData)$Treatment)
+rf.data <- data.frame(response, predictors)
+MozzieForest <- randomForest(response~., data = rf.data, ntree = 1000,importance=T)
+print(MozzieForest)#returns overall Random Forest results
+
+imp <- importance(MozzieForest)#all the steps that are imp or imp. are building a dataframe that contains info about the taxa used by the Random Forest testto classify treatment 
+imp <- data.frame(predictors = rownames(imp), imp)
+imp.sort <- arrange(imp, desc(MeanDecreaseAccuracy))
+imp.sort$predictors <- factor(imp.sort$predictors, levels = imp.sort$predictors)
+imp.20 <- imp.sort[1:7, ] 
+
+ggplot(imp.20, aes(x = predictors, y = MeanDecreaseAccuracy)) +
+  geom_bar(stat = "identity", fill = "indianred") +
+  coord_flip() +
+  ggtitle("Most important genera for classifying  samples\n by Treatment")#\n in a string tells it to start a new line
+
+
+
+destroyX = function(es) {
+  f = es
+  for (row in c(1:nrow(f))){ #for each column in dataframe
+    if (startsWith(row.names(f)[row], "X") == TRUE)  { #if starts with 'X' ..
+      row.names(f)[row] <- substr(row.names(f)[row], 2, 100) #get rid of it
+    }
+    assign(deparse(substitute(es)), f, inherits = TRUE)
+  }
+}
+destroyX(imp.20)
+
+
+otunames <- row.names(imp.20)
+r <- rownames(tax_table(ForestData)) %in% otunames
+otunames
+PredictorTable<-kable(tax_table(ForestData)[r, ])#returns a list of the most important predictors for Random Forest Classification
+
+GenusRandomForestSubset = subset_taxa(GenusAll, row.names(tax_table(GenusAll))%in% otunames)
+
+df <- psmelt(GenusRandomForestSubset)
+df$Abundance=df$Abundance*100
+
+dfSorted<- df[with(df, order(Genus)), ]
+dfSorted$FamilyGenus<-paste0(dfSorted$Family,": \n",dfSorted$Genus)
+Trtdata <- ddply(dfSorted, c("FamilyGenus", "Treatment2"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance),
+                 sd   = sd(Abundance),
+                 se   = sd / sqrt(N)
+)
+TrtdataSorted<- Trtdata[with(Trtdata, order(FamilyGenus)), ]
+TrtdataSorted
+cdataplot=ggplot(Trtdata, aes(x=Treatment2,y=mean))+geom_bar(aes(fill = Treatment2),colour="black", stat="identity")+xlab("Leaf Type ")+ylab("Relative Abundance (%, SEM)") + theme(axis.text.x = element_text(angle = 0, hjust = 0.5))+theme(axis.title.x=element_blank(),legend.position = "none")+facet_wrap(~FamilyGenus,scales = "free_y")+geom_errorbar(aes(ymin=mean-se,ymax=mean+se))+scale_fill_manual(values=cbPalette)
+cdataplot
+
+Comparisons<-compare_means(Abundance ~ Treatment2, data = dfSorted, group.by = "FamilyGenus", p.adjust.method = "fdr",method="kruskal.test")
+Comparisons
+#write.csv(Comparisons, "GenusLevelRFIndicatorsLeafType.csv")
+
+
+
+```
+
+
+
+RiverType
+
+```{r}
+print("RiverType")
+set.seed(155258)
+GenusLevelRF = filter_taxa(GenusAll, function(x) mean(x) > 1e-2, TRUE) #filter out any taxa lower than 1%
+
+ForestData=GenusLevelRF#Change this one so you dont have to rewrite all variables
+predictors=t(otu_table(ForestData))
+response <- as.factor(sample_data(ForestData)$RiverType)
+rf.data <- data.frame(response, predictors)
+MozzieForest <- randomForest(response~., data = rf.data, ntree = 1000,importance=T)
+print(MozzieForest)#returns overall Random Forest results
+
+imp <- importance(MozzieForest)#all the steps that are imp or imp. are building a dataframe that contains info about the taxa used by the Random Forest testto classify treatment 
+imp <- data.frame(predictors = rownames(imp), imp)
+imp.sort <- arrange(imp, desc(MeanDecreaseAccuracy))
+imp.sort$predictors <- factor(imp.sort$predictors, levels = imp.sort$predictors)
+imp.20 <- imp.sort[1:4, ] 
+
+ggplot(imp.20, aes(x = predictors, y = MeanDecreaseAccuracy)) +
+  geom_bar(stat = "identity", fill = "indianred") +
+  coord_flip() +
+  ggtitle("Most important genera for classifying  samples\n by Treatment")#\n in a string tells it to start a new line
+
+
+
+destroyX = function(es) {
+  f = es
+  for (row in c(1:nrow(f))){ #for each column in dataframe
+    if (startsWith(row.names(f)[row], "X") == TRUE)  { #if starts with 'X' ..
+      row.names(f)[row] <- substr(row.names(f)[row], 2, 100) #get rid of it
+    }
+    assign(deparse(substitute(es)), f, inherits = TRUE)
+  }
+}
+destroyX(imp.20)
+
+
+otunames <- row.names(imp.20)
+r <- rownames(tax_table(ForestData)) %in% otunames
+otunames
+PredictorTable<-kable(tax_table(ForestData)[r, ])#returns a list of the most important predictors for Random Forest Classification
+
+GenusRandomForestSubset = subset_taxa(GenusAll, row.names(tax_table(GenusAll))%in% otunames)
+
+df <- psmelt(GenusRandomForestSubset)
+df$Abundance=df$Abundance*100
+
+dfSorted<- df[with(df, order(Genus)), ]
+dfSorted$FamilyGenus<-paste0(dfSorted$Family,": \n",dfSorted$Genus)
+Trtdata <- ddply(dfSorted, c("FamilyGenus", "RiverType"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance),
+                 sd   = sd(Abundance),
+                 se   = sd / sqrt(N)
+)
+TrtdataSorted<- Trtdata[with(Trtdata, order(FamilyGenus)), ]
+TrtdataSorted
+cdataplot=ggplot(Trtdata, aes(x=RiverType,y=mean))+geom_bar(aes(fill = RiverType),colour="black", stat="identity")+xlab("Leaf Type ")+ylab("Relative Abundance (%, SEM)") + theme(axis.text.x = element_text(angle = 0, hjust = 0.5))+theme(axis.title.x=element_blank(),legend.position = "none")+facet_wrap(~FamilyGenus,scales = "free_y")+geom_errorbar(aes(ymin=mean-se,ymax=mean+se))+scale_fill_manual(values=cbPalette)
+cdataplot
+
+Comparisons<-compare_means(Abundance ~ RiverType, data = dfSorted, group.by = "FamilyGenus", p.adjust.method = "fdr",method="kruskal.test")
+Comparisons
+#write.csv(Comparisons, "GenusLevelRFIndicatorsLeafType.csv")
+
+
+
+```
